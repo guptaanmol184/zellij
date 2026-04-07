@@ -625,6 +625,7 @@ pub enum ScreenInstruction {
     // should_float_if_hidden,
     // should_be_in_place_if_hidden
     RenamePane(PaneId, Vec<u8>, Option<NotificationEnd>),
+    RenameActivePane(Vec<u8>, ClientId, Option<NotificationEnd>),
     RenameTab(usize, Vec<u8>, Option<NotificationEnd>),
     RequestPluginPermissions(
         u32, // u32 - plugin_id
@@ -991,6 +992,7 @@ impl From<&ScreenInstruction> for ScreenContext {
             ScreenInstruction::UnsuppressOrExpandPane(..) => ScreenContext::UnsuppressOrExpandPane,
             ScreenInstruction::FocusPaneWithId(..) => ScreenContext::FocusPaneWithId,
             ScreenInstruction::RenamePane(..) => ScreenContext::RenamePane,
+            ScreenInstruction::RenameActivePane(..) => ScreenContext::RenameActivePane,
             ScreenInstruction::RenameTab(..) => ScreenContext::RenameTab,
             ScreenInstruction::RequestPluginPermissions(..) => {
                 ScreenContext::RequestPluginPermissions
@@ -5040,6 +5042,8 @@ pub(crate) fn screen_thread_main(
                                                                                // tab_index
     let mut pending_events_waiting_for_tab: Vec<ScreenInstruction> = vec![];
     let mut pending_events_waiting_for_client: Vec<ScreenInstruction> = vec![];
+    let mut pending_events_waiting_for_pane: HashMap<PaneId, Vec<ScreenInstruction>> =
+        HashMap::new();
     let mut plugin_loading_message_cache = HashMap::new();
     let mut keybind_intercepts = HashMap::new();
     loop {
@@ -5055,12 +5059,21 @@ pub(crate) fn screen_thread_main(
         match event {
             ScreenInstruction::PtyBytes(pid, vte_bytes) => {
                 let all_tabs = screen.get_tabs_mut();
+                let mut vte_bytes = Some(vte_bytes);
                 for tab in all_tabs.values_mut() {
                     if tab.has_terminal_pid(pid) {
-                        tab.handle_pty_bytes(pid, vte_bytes)
-                            .context("failed to process pty bytes")?;
+                        if let Some(bytes) = vte_bytes.take() {
+                            tab.handle_pty_bytes(pid, bytes)
+                                .context("failed to process pty bytes")?;
+                        }
                         break;
                     }
+                }
+                if let Some(vte_bytes) = vte_bytes {
+                    pending_events_waiting_for_pane
+                        .entry(PaneId::Terminal(pid))
+                        .or_default()
+                        .push(ScreenInstruction::PtyBytes(pid, vte_bytes));
                 }
                 let _ = screen
                     .bus
@@ -5215,6 +5228,11 @@ pub(crate) fn screen_thread_main(
                         }
                     },
                 };
+                if let Some(pending_events) = pending_events_waiting_for_pane.remove(&pid) {
+                    for event in pending_events {
+                        screen.bus.senders.send_to_screen(event).non_fatal();
+                    }
+                }
                 screen.log_and_report_session_state()?;
 
                 screen.render(None)?;
@@ -6163,11 +6181,19 @@ pub(crate) fn screen_thread_main(
                         ));
                     },
                     None => {
+                        let mut found = false;
                         for tab in screen.tabs.values_mut() {
                             if tab.get_all_pane_ids().contains(&id) {
                                 tab.close_pane(id, false, exit_status);
+                                found = true;
                                 break;
                             }
+                        }
+                        if !found {
+                            pending_events_waiting_for_pane
+                                .entry(id)
+                                .or_default()
+                                .push(ScreenInstruction::ClosePane(id, None, None, exit_status));
                         }
                     },
                 }
@@ -6187,11 +6213,19 @@ pub(crate) fn screen_thread_main(
             },
             ScreenInstruction::HoldPane(id, exit_status, run_command) => {
                 let is_first_run = false;
+                let mut found = false;
                 for tab in screen.tabs.values_mut() {
                     if tab.get_all_pane_ids().contains(&id) {
-                        tab.hold_pane(id, exit_status, is_first_run, run_command);
+                        tab.hold_pane(id, exit_status, is_first_run, run_command.clone());
+                        found = true;
                         break;
                     }
+                }
+                if !found {
+                    pending_events_waiting_for_pane
+                        .entry(id)
+                        .or_default()
+                        .push(ScreenInstruction::HoldPane(id, exit_status, run_command));
                 }
                 screen.log_and_report_session_state()?;
             },
@@ -7631,6 +7665,17 @@ pub(crate) fn screen_thread_main(
                         break;
                     }
                 }
+                screen.log_and_report_session_state()?;
+            },
+            ScreenInstruction::RenameActivePane(new_name, client_id, _completion_tx) => {
+                active_tab_and_connected_client_id!(
+                    screen,
+                    client_id,
+                    |tab: &mut Tab, client_id: ClientId| tab
+                        .rename_active_pane(new_name, client_id),
+                    ?
+                );
+                screen.render(None)?;
                 screen.log_and_report_session_state()?;
             },
             ScreenInstruction::RenameTab(
