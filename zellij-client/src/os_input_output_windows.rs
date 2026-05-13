@@ -194,19 +194,20 @@ fn enable_vt_processing_on_stdout() {
 
 /// Enable mouse support on Windows.
 ///
-/// When TERM is set we're on the VT input path (terminal emulator like
-/// Alacritty via ConPTY). We must NOT use crossterm's EnableMouseCapture
-/// because it does a full SetConsoleMode() that would overwrite the mode
-/// set by enable_vt_input(), clobbering ENABLE_VIRTUAL_TERMINAL_INPUT.
+/// When running in a VT-capable terminal (detected by `should_use_vt_input()`:
+/// TERM is set or WT_SESSION is present), we must NOT use crossterm's
+/// EnableMouseCapture because it does a full SetConsoleMode() that would
+/// overwrite the mode set by enable_vt_input(), clobbering
+/// ENABLE_VIRTUAL_TERMINAL_INPUT.
 ///
 /// Instead, we enable ENABLE_VIRTUAL_TERMINAL_PROCESSING on stdout so
 /// ConPTY enters passthrough mode, then write ANSI mouse-enable sequences.
 ///
-/// When TERM is not set we're in a native console (cmd, PowerShell,
-/// Windows Terminal) and use crossterm's Console API approach.
+/// On legacy consoles (cmd.exe, ConHost without WT_SESSION) we use
+/// crossterm's Console API approach.
 pub(crate) fn enable_mouse_support(stdout: &mut dyn Write) -> Result<()> {
     let err_context = "failed to enable mouse mode";
-    if std::env::var("TERM").is_ok() {
+    if crate::stdin_handler_windows::should_use_vt_input() {
         enable_vt_processing_on_stdout();
         stdout
             .write_all(super::os_input_output::ENABLE_MOUSE_SUPPORT.as_bytes())
@@ -236,7 +237,7 @@ pub(crate) fn restore_console_mode() {
 /// See `enable_mouse_support()` for rationale on VT vs Console API paths.
 pub(crate) fn disable_mouse_support(stdout: &mut dyn Write) -> Result<()> {
     let err_context = "failed to disable mouse mode";
-    if std::env::var("TERM").is_ok() {
+    if crate::stdin_handler_windows::should_use_vt_input() {
         stdout
             .write_all(super::os_input_output::DISABLE_MOUSE_SUPPORT.as_bytes())
             .context(err_context)?;

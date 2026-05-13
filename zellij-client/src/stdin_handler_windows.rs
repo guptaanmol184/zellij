@@ -12,6 +12,23 @@ use zellij_utils::channels::SenderWithContext;
 use zellij_utils::input::{cast_crossterm_key, from_crossterm_mouse};
 use zellij_utils::vendored::termwiz::input::InputEvent;
 
+/// Determine whether to use VT byte-stream reading instead of the native
+/// Windows console INPUT_RECORD path.
+///
+/// VT reader is needed when the hosting terminal supports raw VT input:
+/// - `TERM` is set: Unix-origin terminals running on Windows (e.g. Alacritty)
+/// - `WT_SESSION` is set: Windows Terminal, which natively speaks VT sequences
+///
+/// The VT reader path enables `ENABLE_VIRTUAL_TERMINAL_INPUT` on stdin so that
+/// `ReadFile` returns raw VT bytes, allowing the termwiz parser to properly
+/// detect escape sequences like bracketed paste markers (`\x1b[200~`).
+///
+/// Without this, ConPTY's VT→INPUT_RECORD translation loses paste boundaries,
+/// causing multi-line paste to be replayed as individual keystrokes.
+pub(crate) fn should_use_vt_input() -> bool {
+    std::env::var("TERM").is_ok() || std::env::var("WT_SESSION").is_ok()
+}
+
 /// Saved console input mode from before `enable_vt_input()` modified it.
 /// Used by `restore_vt_input()` to put the console back the way the shell
 /// left it, clearing flags like ENABLE_MOUSE_INPUT that crossterm's
